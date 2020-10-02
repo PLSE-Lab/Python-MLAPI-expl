@@ -1,0 +1,5 @@
+print("With spaces")
+print("\n \n \n \n")
+print("Without spaces")
+print("\n\n\n\n")
+print("----")

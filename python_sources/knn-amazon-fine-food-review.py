@@ -1,0 +1,1944 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Amazon Fine Food Reviews Analysis
+# 
+# 
+# Data Source: https://www.kaggle.com/snap/amazon-fine-food-reviews <br>
+# 
+# EDA: https://nycdatascience.com/blog/student-works/amazon-fine-foods-visualization/
+# 
+# 
+# The Amazon Fine Food Reviews dataset consists of reviews of fine foods from Amazon.<br>
+# 
+# Number of reviews: 568,454<br>
+# Number of users: 256,059<br>
+# Number of products: 74,258<br>
+# Timespan: Oct 1999 - Oct 2012<br>
+# Number of Attributes/Columns in data: 10 
+# 
+# Attribute Information:
+# 
+# 1. Id
+# 2. ProductId - unique identifier for the product
+# 3. UserId - unqiue identifier for the user
+# 4. ProfileName
+# 5. HelpfulnessNumerator - number of users who found the review helpful
+# 6. HelpfulnessDenominator - number of users who indicated whether they found the review helpful or not
+# 7. Score - rating between 1 and 5
+# 8. Time - timestamp for the review
+# 9. Summary - brief summary of the review
+# 10. Text - text of the review
+# 
+# 
+# #### Objective:
+# Given a review, determine whether the review is positive (rating of 4 or 5) or negative (rating of 1 or 2).
+# 
+# <br>
+# [Q] How to determine if a review is positive or negative?<br>
+# <br> 
+# [Ans] We could use Score/Rating. A rating of 4 or 5 can be cosnidered as a positive review. A rating of 1 or 2 can be considered as negative one. A review of rating 3 is considered nuetral and such reviews are ignored from our analysis. This is an approximate and proxy way of determining the polarity (positivity/negativity) of a review.
+# 
+# 
+# 
+
+# # [1]. Reading Data
+
+# ## [1.1] Loading the data
+# 
+# The dataset is available in two forms
+# 1. .csv file
+# 2. SQLite Database
+# 
+# In order to load the data, We have used the SQLITE dataset as it is easier to query the data and visualise the data efficiently.
+# <br> 
+# 
+# Here as we only want to get the global sentiment of the recommendations (positive or negative), we will purposefully ignore all Scores equal to 3. If the score is above 3, then the recommendation wil be set to "positive". Otherwise, it will be set to "negative".
+
+# In[ ]:
+
+
+get_ipython().run_line_magic('matplotlib', 'inline')
+import warnings
+warnings.filterwarnings("ignore")
+
+
+import sqlite3
+import pandas as pd
+import numpy as np
+import nltk
+import string
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.feature_extraction.text import TfidfTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics import confusion_matrix
+from sklearn import metrics
+from sklearn.metrics import roc_curve, auc
+from nltk.stem.porter import PorterStemmer
+
+import re
+# Tutorial about Python regular expressions: https://pymotw.com/2/re/
+import string
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from nltk.stem.wordnet import WordNetLemmatizer
+
+from gensim.models import Word2Vec
+from gensim.models import KeyedVectors
+import pickle
+
+from tqdm import tqdm
+import os
+
+
+# In[ ]:
+
+
+# using SQLite Table to read data.
+con = sqlite3.connect('../input/database.sqlite') 
+
+# filtering only positive and negative reviews i.e. 
+# not taking into consideration those reviews with Score=3
+# SELECT * FROM Reviews WHERE Score != 3 LIMIT 500000, will give top 500000 data points
+# you can change the number to any other number based on your computing power
+
+# filtered_data = pd.read_sql_query(""" SELECT * FROM Reviews WHERE Score != 3 LIMIT 500000""", con) 
+# for tsne assignment you can take 5k data points
+
+filtered_data = pd.read_sql_query(""" SELECT * FROM Reviews WHERE Score != 3 LIMIT 50000""", con) 
+
+# Give reviews with Score>3 a positive rating(1), and reviews with a score<3 a negative rating(0).
+def partition(x):
+    if x < 3:
+        return 0
+    return 1
+
+#changing reviews with score less than 3 to be positive and vice-versa
+actualScore = filtered_data['Score']
+positiveNegative = actualScore.map(partition) 
+filtered_data['Score'] = positiveNegative
+print("Number of data points in our data", filtered_data.shape)
+filtered_data.head(3)
+
+
+# In[ ]:
+
+
+display = pd.read_sql_query("""
+SELECT UserId, ProductId, ProfileName, Time, Score, Text, COUNT(*)
+FROM Reviews
+GROUP BY UserId
+HAVING COUNT(*)>1
+""", con)
+
+
+# In[ ]:
+
+
+print(display.shape)
+display.head()
+
+
+# In[ ]:
+
+
+display[display['UserId']=='AZY10LLTJ71NX']
+
+
+# In[ ]:
+
+
+display['COUNT(*)'].sum()
+
+
+# #  [2] Exploratory Data Analysis
+
+# ## [2.1] Data Cleaning: Deduplication
+# 
+# It is observed (as shown in the table below) that the reviews data had many duplicate entries. Hence it was necessary to remove duplicates in order to get unbiased results for the analysis of the data.  Following is an example:
+
+# In[ ]:
+
+
+display= pd.read_sql_query("""
+SELECT *
+FROM Reviews
+WHERE Score != 3 AND UserId="AR5J8UI46CURR"
+ORDER BY ProductID
+""", con)
+display.head()
+
+
+# As it can be seen above that same user has multiple reviews with same values for HelpfulnessNumerator, HelpfulnessDenominator, Score, Time, Summary and Text and on doing analysis it was found that <br>
+# <br> 
+# ProductId=B000HDOPZG was Loacker Quadratini Vanilla Wafer Cookies, 8.82-Ounce Packages (Pack of 8)<br>
+# <br> 
+# ProductId=B000HDL1RQ was Loacker Quadratini Lemon Wafer Cookies, 8.82-Ounce Packages (Pack of 8) and so on<br>
+# 
+# It was inferred after analysis that reviews with same parameters other than ProductId belonged to the same product just having different flavour or quantity. Hence in order to reduce redundancy it was decided to eliminate the rows having same parameters.<br>
+# 
+# The method used for the same was that we first sort the data according to ProductId and then just keep the first similar product review and delelte the others. for eg. in the above just the review for ProductId=B000HDL1RQ remains. This method ensures that there is only one representative for each product and deduplication without sorting would lead to possibility of different representatives still existing for the same product.
+
+# In[ ]:
+
+
+#Sorting data according to ProductId in ascending order
+sorted_data=filtered_data.sort_values('ProductId', axis=0, ascending=True, inplace=False, kind='quicksort', na_position='last')
+
+
+# In[ ]:
+
+
+#Deduplication of entries
+final=sorted_data.drop_duplicates(subset={"UserId","ProfileName","Time","Text"}, keep='first', inplace=False)
+final.shape
+
+
+# In[ ]:
+
+
+#Checking to see how much % of data still remains
+(final['Id'].size*1.0)/(filtered_data['Id'].size*1.0)*100
+
+
+# <b>Observation:-</b> It was also seen that in two rows given below the value of HelpfulnessNumerator is greater than HelpfulnessDenominator which is not practically possible hence these two rows too are removed from calcualtions
+
+# In[ ]:
+
+
+display= pd.read_sql_query("""
+SELECT *
+FROM Reviews
+WHERE Score != 3 AND Id=44737 OR Id=64422
+ORDER BY ProductID
+""", con)
+
+display.head()
+
+
+# In[ ]:
+
+
+final=final[final.HelpfulnessNumerator<=final.HelpfulnessDenominator]
+
+
+# In[ ]:
+
+
+#Before starting the next phase of preprocessing lets see the number of entries left
+print(final.shape)
+
+#How many positive and negative reviews are present in our dataset?
+final['Score'].value_counts()
+
+
+# #  [3] Preprocessing
+
+# ## [3.1].  Preprocessing Review Text
+# 
+# Now that we have finished deduplication our data requires some preprocessing before we go on further with analysis and making the prediction model.
+# 
+# Hence in the Preprocessing phase we do the following in the order below:-
+# 
+# 1. Begin by removing the html tags
+# 2. Remove any punctuations or limited set of special characters like , or . or # etc.
+# 3. Check if the word is made up of english letters and is not alpha-numeric
+# 4. Check to see if the length of the word is greater than 2 (as it was researched that there is no adjective in 2-letters)
+# 5. Convert the word to lowercase
+# 6. Remove Stopwords
+# 7. Finally Snowball Stemming the word (it was obsereved to be better than Porter Stemming)<br>
+# 
+# After which we collect the words used to describe positive and negative reviews
+
+# In[ ]:
+
+
+# printing some random reviews
+sent_0 = final['Text'].values[0]
+print(sent_0)
+print("="*50)
+
+sent_1000 = final['Text'].values[1000]
+print(sent_1000)
+print("="*50)
+
+sent_1500 = final['Text'].values[1500]
+print(sent_1500)
+print("="*50)
+
+sent_4900 = final['Text'].values[4900]
+print(sent_4900)
+print("="*50)
+
+
+# In[ ]:
+
+
+# remove urls from text python: https://stackoverflow.com/a/40823105/4084039
+sent_0 = re.sub(r"http\S+", "", sent_0)
+sent_1000 = re.sub(r"http\S+", "", sent_1000)
+sent_150 = re.sub(r"http\S+", "", sent_1500)
+sent_4900 = re.sub(r"http\S+", "", sent_4900)
+
+print(sent_0)
+
+
+# In[ ]:
+
+
+# https://stackoverflow.com/questions/16206380/python-beautifulsoup-how-to-remove-all-tags-from-an-element
+from bs4 import BeautifulSoup
+
+soup = BeautifulSoup(sent_0, 'lxml')
+text = soup.get_text()
+print(text)
+print("="*50)
+
+soup = BeautifulSoup(sent_1000, 'lxml')
+text = soup.get_text()
+print(text)
+print("="*50)
+
+soup = BeautifulSoup(sent_1500, 'lxml')
+text = soup.get_text()
+print(text)
+print("="*50)
+
+soup = BeautifulSoup(sent_4900, 'lxml')
+text = soup.get_text()
+print(text)
+
+
+# In[ ]:
+
+
+# https://stackoverflow.com/a/47091490/4084039
+import re
+
+def decontracted(phrase):
+    # specific
+    phrase = re.sub(r"won't", "will not", phrase)
+    phrase = re.sub(r"can\'t", "can not", phrase)
+
+    # general
+    phrase = re.sub(r"n\'t", " not", phrase)
+    phrase = re.sub(r"\'re", " are", phrase)
+    phrase = re.sub(r"\'s", " is", phrase)
+    phrase = re.sub(r"\'d", " would", phrase)
+    phrase = re.sub(r"\'ll", " will", phrase)
+    phrase = re.sub(r"\'t", " not", phrase)
+    phrase = re.sub(r"\'ve", " have", phrase)
+    phrase = re.sub(r"\'m", " am", phrase)
+    return phrase
+
+
+# In[ ]:
+
+
+sent_1500 = decontracted(sent_1500)
+print(sent_1500)
+print("="*50)
+
+
+# In[ ]:
+
+
+#remove words with numbers python: https://stackoverflow.com/a/18082370/4084039
+sent_0 = re.sub("\S*\d\S*", "", sent_0).strip()
+print(sent_0)
+
+
+# In[ ]:
+
+
+#remove spacial character: https://stackoverflow.com/a/5843547/4084039
+sent_1500 = re.sub('[^A-Za-z0-9]+', ' ', sent_1500)
+print(sent_1500)
+
+
+# In[ ]:
+
+
+# https://gist.github.com/sebleier/554280
+# we are removing the words from the stop words list: 'no', 'nor', 'not'
+# <br /><br /> ==> after the above steps, we are getting "br br"
+# we are including them into stop words list
+# instead of <br /> if we have <br/> these tags would have revmoved in the 1st step
+
+stopwords= set(['br', 'the', 'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', "you're", "you've",            "you'll", "you'd", 'your', 'yours', 'yourself', 'yourselves', 'he', 'him', 'his', 'himself',             'she', "she's", 'her', 'hers', 'herself', 'it', "it's", 'its', 'itself', 'they', 'them', 'their',            'theirs', 'themselves', 'what', 'which', 'who', 'whom', 'this', 'that', "that'll", 'these', 'those',             'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does',             'did', 'doing', 'a', 'an', 'the', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while', 'of',             'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after',            'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 'under', 'again', 'further',            'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more',            'most', 'other', 'some', 'such', 'only', 'own', 'same', 'so', 'than', 'too', 'very',             's', 't', 'can', 'will', 'just', 'don', "don't", 'should', "should've", 'now', 'd', 'll', 'm', 'o', 're',             've', 'y', 'ain', 'aren', "aren't", 'couldn', "couldn't", 'didn', "didn't", 'doesn', "doesn't", 'hadn',            "hadn't", 'hasn', "hasn't", 'haven', "haven't", 'isn', "isn't", 'ma', 'mightn', "mightn't", 'mustn',            "mustn't", 'needn', "needn't", 'shan', "shan't", 'shouldn', "shouldn't", 'wasn', "wasn't", 'weren', "weren't",             'won', "won't", 'wouldn', "wouldn't"])
+
+
+# In[ ]:
+
+
+# Combining all the above stundents 
+from tqdm import tqdm
+preprocessed_reviews = []
+# tqdm is for printing the status bar
+for sentance in tqdm(final['Text'].values):
+    sentance = re.sub(r"http\S+", "", sentance)
+    sentance = BeautifulSoup(sentance, 'lxml').get_text()
+    sentance = decontracted(sentance)
+    sentance = re.sub("\S*\d\S*", "", sentance).strip()
+    sentance = re.sub('[^A-Za-z]+', ' ', sentance)
+    # https://gist.github.com/sebleier/554280
+    sentance = ' '.join(e.lower() for e in sentance.split() if e.lower() not in stopwords)
+    preprocessed_reviews.append(sentance.strip())
+
+
+# In[ ]:
+
+
+preprocessed_reviews[1500]
+
+
+# <h2><font color='red'>[3.2] Preprocessing Review Summary</font></h2>
+
+# In[ ]:
+
+
+## Similartly you can do preprocessing for review summary also.
+
+
+# # [4] Featurization
+
+# ## [4.1] BAG OF WORDS
+
+# In[ ]:
+
+
+#BoW
+count_vect = CountVectorizer() #in scikit-learn
+count_vect.fit(preprocessed_reviews)
+print("some feature names ", count_vect.get_feature_names()[:10])
+print('='*50)
+
+final_counts = count_vect.transform(preprocessed_reviews)
+# print(final_counts)
+# print("the type of count vectorizer ",type(final_counts))
+# print("the shape of out text BOW vectorizer ",final_counts.get_shape())
+# print("the number of unique words ", final_counts.get_shape()[1])
+# print(final['Score'])
+
+
+# 
+# 3++## [4.2] Bi-Grams and n-Grams.
+
+# In[ ]:
+
+
+#bi-gram, tri-gram and n-gram
+
+#removing stop words like "not" should be avoided before building n-grams
+# count_vect = CountVectorizer(ngram_range=(1,2))
+# please do read the CountVectorizer documentation http://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.CountVectorizer.html
+
+# you can choose these numebrs min_df=10, max_features=5000, of your choice
+count_vect = CountVectorizer(ngram_range=(1,2), min_df=10, max_features=5000)
+final_bigram_counts = count_vect.fit_transform(preprocessed_reviews)
+print("the type of count vectorizer ",type(final_bigram_counts))
+print("the shape of out text BOW vectorizer ",final_bigram_counts.get_shape())
+print("the number of unique words including both unigrams and bigrams ", final_bigram_counts.get_shape()[1])
+
+
+# ## [4.3] TF-IDF
+
+# In[ ]:
+
+
+tf_idf_vect = TfidfVectorizer(ngram_range=(1,2), min_df=10)
+tf_idf_vect.fit(preprocessed_reviews)
+print("some sample features(unique words in the corpus)",tf_idf_vect.get_feature_names()[0:10])
+print('='*50)
+
+final_tf_idf = tf_idf_vect.transform(preprocessed_reviews)
+print("the type of count vectorizer ",type(final_tf_idf))
+print("the shape of out text TFIDF vectorizer ",final_tf_idf.get_shape())
+print("the number of unique words including both unigrams and bigrams ", final_tf_idf.get_shape()[1])
+
+
+# ## [4.4] Word2Vec
+
+# In[ ]:
+
+
+# Train your own Word2Vec model using your own text corpus
+i=0
+list_of_sentance=[]
+for sentance in preprocessed_reviews:
+    list_of_sentance.append(sentance.split())
+
+
+# In[ ]:
+
+
+# Using Google News Word2Vectors
+
+# in this project we are using a pretrained model by google
+# its 3.3G file, once you load this into your memory 
+# it occupies ~9Gb, so please do this step only if you have >12G of ram
+# we will provide a pickle file wich contains a dict , 
+# and it contains all our courpus words as keys and  model[word] as values
+# To use this code-snippet, download "GoogleNews-vectors-negative300.bin" 
+# from https://drive.google.com/file/d/0B7XkCwpI5KDYNlNUTTlSS21pQmM/edit
+# it's 1.9GB in size.
+
+
+# http://kavita-ganesan.com/gensim-word2vec-tutorial-starter-code/#.W17SRFAzZPY
+# you can comment this whole cell
+# or change these varible according to your need
+
+is_your_ram_gt_16g=False
+want_to_use_google_w2v = False
+want_to_train_w2v = True
+
+if want_to_train_w2v:
+    # min_count = 5 considers only words that occured atleast 5 times
+    w2v_model=Word2Vec(list_of_sentance,min_count=5,size=50, workers=4)
+    print(w2v_model.wv.most_similar('great'))
+    print('='*50)
+    print(w2v_model.wv.most_similar('worst'))
+    
+elif want_to_use_google_w2v and is_your_ram_gt_16g:
+    if os.path.isfile('GoogleNews-vectors-negative300.bin'):
+        w2v_model=KeyedVectors.load_word2vec_format('GoogleNews-vectors-negative300.bin', binary=True)
+        print(w2v_model.wv.most_similar('great'))
+        print(w2v_model.wv.most_similar('worst'))
+    else:
+        print("you don't have gogole's word2vec file, keep want_to_train_w2v = True, to train your own w2v ")
+
+
+# In[ ]:
+
+
+w2v_words = list(w2v_model.wv.vocab)
+print("number of words that occured minimum 5 times ",len(w2v_words))
+print("sample words ", w2v_words[0:50])
+
+
+# ## [4.4.1] Converting text into vectors using Avg W2V, TFIDF-W2V
+
+# #### [4.4.1.1] Avg W2v
+
+# In[ ]:
+
+
+# average Word2Vec
+# compute average word2vec for each review.
+sent_vectors = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    sent_vectors.append(sent_vec)
+print(len(sent_vectors))
+print(len(sent_vectors[0]))
+
+
+# #### [4.4.1.2] TFIDF weighted W2v
+
+# In[ ]:
+
+
+# S = ["abc def pqr", "def def def abc", "pqr pqr def"]
+model = TfidfVectorizer()
+tf_idf_matrix = model.fit_transform(preprocessed_reviews)
+# we are converting a dictionary with word as a key, and the idf as a value
+dictionary = dict(zip(model.get_feature_names(), list(model.idf_)))
+
+
+# In[ ]:
+
+
+# TF-IDF weighted Word2Vec
+tfidf_feat = model.get_feature_names() # tfidf words/col-names
+# final_tf_idf is the sparse matrix with row= sentence, col=word and cell_val = tfidf
+
+tfidf_sent_vectors = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    tfidf_sent_vectors.append(sent_vec)
+    row += 1
+
+
+# # [5] Assignment 3: KNN
+
+# 1. <ol>
+#     <li><strong>Apply Knn(brute force version) on these feature sets</strong>
+#         <ul>
+#             <li><font color='red'>SET 1:</font>Review text, preprocessed one converted into vectors using (BOW)</li>
+#             <li><font color='red'>SET 2:</font>Review text, preprocessed one converted into vectors using (TFIDF)</li>
+#             <li><font color='red'>SET 3:</font>Review text, preprocessed one converted into vectors using (AVG W2v)</li>
+#             <li><font color='red'>SET 4:</font>Review text, preprocessed one converted into vectors using (TFIDF W2v)</li>
+#         </ul>
+#     </li>
+#     <br>
+#     <li><strong>Apply Knn(kd tree version) on these feature sets</strong>
+#         <br><font color='red'>NOTE: </font>sklearn implementation of kd-tree accepts only dense matrices, you need to convert the sparse matrices of CountVectorizer/TfidfVectorizer into dense matices. You can convert sparse matrices to dense using .toarray() attribute. For more information please visit this <a href='https://docs.scipy.org/doc/scipy-0.18.1/reference/generated/scipy.sparse.csr_matrix.toarray.html'>link</a>
+#         <ul>
+#             <li><font color='red'>SET 5:</font>Review text, preprocessed one converted into vectors using (BOW) but with restriction on maximum features generated.
+#             <pre>
+#             count_vect = CountVectorizer(min_df=10, max_features=500) 
+#             count_vect.fit(preprocessed_reviews)
+#             </pre>
+#             </li>
+#             <li><font color='red'>SET 6:</font>Review text, preprocessed one converted into vectors using (TFIDF) but with restriction on maximum features generated.
+#             <pre>
+#                 tf_idf_vect = TfidfVectorizer(min_df=10, max_features=500)
+#                 tf_idf_vect.fit(preprocessed_reviews)
+#             </pre>
+#             </li>
+#             <li><font color='red'>SET 3:</font>Review text, preprocessed one converted into vectors using (AVG W2v)</li>
+#             <li><font color='red'>SET 4:</font>Review text, preprocessed one converted into vectors using (TFIDF W2v)</li>
+#         </ul>
+#     </li>
+#     <br>
+#     <li><strong>The hyper paramter tuning(find best K)</strong>
+#         <ul>
+#     <li>Find the best hyper parameter which will give the maximum <a href='https://www.appliedaicourse.com/course/applied-ai-course-online/lessons/receiver-operating-characteristic-curve-roc-curve-and-auc-1/'>AUC</a> value</li>
+#     <li>Find the best hyper paramter using k-fold cross validation or simple cross validation data</li>
+#     <li>Use gridsearch cv or randomsearch cv or you can also write your own for loops to do this task of hyperparameter tuning</li>
+#         </ul>
+#     </li>
+#     <br>
+#     <li>
+#     <strong>Representation of results</strong>
+#         <ul>
+#     <li>You need to plot the performance of model both on train data and cross validation data for each hyper parameter, like shown in the figure
+#     <img src='train_cv_auc.JPG' width=300px></li>
+#     <li>Once after you found the best hyper parameter, you need to train your model with it, and find the AUC on test data and plot the ROC curve on both train and test.
+#     <img src='train_test_auc.JPG' width=300px></li>
+#     <li>Along with plotting ROC curve, you need to print the <a href='c'>confusion matrix</a> with predicted and original labels of test data points
+#     <img src='confusion_matrix.png' width=300px></li>
+#         </ul>
+#     </li>
+#     <br>
+#     <li><strong>Conclusion</strong>
+#         <ul>
+#     <li>You need to summarize the results at the end of the notebook, summarize it in the table format. To print out a table please refer to this prettytable library<a href='http://zetcode.com/python/prettytable/'> link</a> 
+#         <img src='summary.JPG' width=400px>
+#     </li>
+#         </ul>
+# </ol>
+
+# <h4><font color='red'>Note: Data Leakage</font></h4>
+# 
+# 1. There will be an issue of data-leakage if you vectorize the entire data and then split it into train/cv/test.
+# 2. To avoid the issue of data-leakag, make sure to split your data first and then vectorize it. 
+# 3. While vectorizing your data, apply the method fit_transform() on you train data, and apply the method transform() on cv/test data.
+# 4. For more details please go through this <a href='https://soundcloud.com/applied-ai-course/leakage-bow-and-tfidf'>link.</a>
+
+# ## [5.1] Applying KNN brute force
+
+# ### [5.1.1] Applying KNN brute force on BOW,<font color='red'> SET 1</font>
+
+# In[ ]:
+
+
+# Importing Library
+import numpy as np
+import pandas as pd
+import sklearn
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import cross_val_score
+from collections import Counter
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+
+
+# In[ ]:
+
+
+#Spliting Traing Test and CrossValidation
+X=preprocessed_reviews
+X=np.array(X)
+y = np.array(final['Score'])
+X_1, X_test, y_1, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+X_tr, X_cv, y_tr, y_cv = train_test_split(X_1, y_1, test_size=0.3,random_state=1) 
+
+
+# In[ ]:
+
+
+#converting Reviews to Bag of words
+count_vect = CountVectorizer()
+final_X_tr=count_vect.fit_transform(X_tr)
+final_X_test=count_vect.transform(X_test)
+final_X_cv=count_vect.transform(X_cv)
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in range(1,100,4):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print(k_best)        
+print(max_auc_score)
+k1=k_best
+auc1=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Traing and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ### [5.1.2] Applying KNN brute force on TFIDF,<font color='red'> SET 2</font>
+
+# In[ ]:
+
+
+# Please write all the code with proper documentation
+#Spliting Traing Test and CrossValidation
+X=preprocessed_reviews
+X=np.array(X)
+y = np.array(final['Score'])
+X_1, X_test, y_1, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+X_tr, X_cv, y_tr, y_cv = train_test_split(X_1, y_1, test_size=0.3,random_state=1) 
+
+
+# In[ ]:
+
+
+#converting Reviews to tf_idf_vec
+tf_idf_vect = TfidfVectorizer(ngram_range=(1,2),min_df=10 )
+final_X_tr=tf_idf_vect.fit_transform(X_tr)
+final_X_test=tf_idf_vect.transform(X_test)
+final_X_cv=tf_idf_vect.transform(X_cv)
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in range(1,100,4):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='brute',metric='cosine',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print(k_best)        
+k2=k_best
+auc2=max_auc_score        
+        
+
+
+# In[ ]:
+
+
+print(max_auc_score)
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Traing and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ### [5.1.3] Applying KNN brute force on AVG W2V,<font color='red'> SET 3</font>
+
+# In[ ]:
+
+
+X=preprocessed_reviews
+y = np.array(final['Score'])
+X_1, X_test, y_1, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+X_tr, X_cv, y_tr, y_cv = train_test_split(X_1, y_1, test_size=0.3,random_state=1)
+# Please write all the code with proper documentation
+# average Word2Vec
+# compute average word2vec for each review.
+list_of_sentance_tr=[]
+for sentance in X_tr:
+    list_of_sentance_tr.append(sentance.split())
+final_X_tr = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance_tr): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    final_X_tr.append(sent_vec)
+    
+    
+list_of_sentance_cv=[]
+for sentance in X_cv:
+    list_of_sentance_cv.append(sentance.split())    
+final_X_cv = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance_cv): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    final_X_cv.append(sent_vec)    
+    
+    
+list_of_sentance_test=[]
+for sentance in X_test:
+    list_of_sentance_test.append(sentance.split())    
+final_X_test = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance_test): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    final_X_test.append(sent_vec)    
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in tqdm(range(1,100,4)):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print("best K is",k_best)
+print("max AUC Score is",max_auc_score)
+k3=k_best
+auc3=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Train and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ### [5.1.4] Applying KNN brute force on TFIDF W2V,<font color='red'> SET 4</font>
+
+# In[ ]:
+
+
+# Please write all the code with proper documentation
+# TF-IDF weighted Word2Vec
+tfidf_feat = model.get_feature_names() # tfidf words/col-names
+# final_tf_idf is the sparse matrix with row= sentence, col=word and cell_val = tfidf
+
+list_of_sentance_tr=[]
+for sentance in X_tr:
+    list_of_sentance_tr.append(sentance.split())
+final_X_tr = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance_tr): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    final_X_tr.append(sent_vec)
+    row += 1
+
+    
+list_of_sentance_cv=[]
+for sentance in X_cv:
+    list_of_sentance_cv.append(sentance.split())
+final_X_cv = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance_cv): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    final_X_cv.append(sent_vec)
+    row += 1 
+    
+    
+list_of_sentance_test=[]
+for sentance in X_test:
+    list_of_sentance_test.append(sentance.split())
+final_X_test = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance_test): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    final_X_test.append(sent_vec)
+    row += 1    
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in tqdm(range(1,100,4)):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print("best K is",k_best)
+print("max AUC Score is",max_auc_score)
+k4=k_best
+auc4=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='brute',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Train and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ## [5.2] Applying KNN kd-tree
+
+# ### [5.2.1] Applying KNN kd-tree on BOW,<font color='red'> SET 5</font>
+
+# In[ ]:
+
+
+# Please write all the code with proper documentation
+#Spliting Traing Test and CrossValidation
+X=preprocessed_reviews
+X=np.array(X)
+y = np.array(final['Score'])
+
+X, X_waste, y, y_waste = train_test_split(X, y, test_size=0.70, random_state=1)
+X_1, X_test, y_1, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+X_tr, X_cv, y_tr, y_cv = train_test_split(X_1, y_1, test_size=0.3,random_state=1) 
+
+
+# In[ ]:
+
+
+#converting Reviews to Bag of words
+count_vect = CountVectorizer()
+final_X_tr=count_vect.fit_transform(X_tr)
+final_X_test=count_vect.transform(X_test)
+final_X_cv=count_vect.transform(X_cv)
+
+
+# In[ ]:
+
+
+#converting them todense bcz kd tree doest work on sparse matrics
+final_X_tr=final_X_tr.todense()
+final_X_test=final_X_test.todense()
+final_X_cv=final_X_cv.todense()
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in tqdm(range(1,100,20)):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print("best k is",k_best)
+print("Max AUC is",max_auc_score)
+k5=k_best
+auc5=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Traing and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ### [5.2.2] Applying KNN kd-tree on TFIDF,<font color='red'> SET 6</font>
+
+# In[ ]:
+
+
+# Please write all the code with proper documentation
+X_1, X_test, y_1, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+X_tr, X_cv, y_tr, y_cv = train_test_split(X_1, y_1, test_size=0.3,random_state=1) 
+
+
+# In[ ]:
+
+
+#converting Reviews to tf_idf_vec
+tf_idf_vect = TfidfVectorizer(ngram_range=(1,2),min_df=10)
+final_X_tr=tf_idf_vect.fit_transform(X_tr)
+final_X_test=tf_idf_vect.transform(X_test)
+final_X_cv=tf_idf_vect.transform(X_cv)
+
+#converting them todense bcz kd tree doest work on sparse matrics
+final_X_tr=final_X_tr.todense()
+final_X_test=final_X_test.todense()
+final_X_cv=final_X_cv.todense()
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in tqdm(range(1,100,20)):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print(k_best) 
+print(max_auc_score)
+k6=k_best
+auc6=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Traing and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ### [5.2.3] Applying KNN kd-tree on AVG W2V,<font color='red'> SET 3</font>
+
+# In[ ]:
+
+
+# Please write all the code with proper documentation
+X_1, X_test, y_1, y_test = train_test_split(X, y, test_size=0.3, random_state=1)
+X_tr, X_cv, y_tr, y_cv = train_test_split(X_1, y_1, test_size=0.3,random_state=1)
+# Please write all the code with proper documentation
+# average Word2Vec
+# compute average word2vec for each review.
+list_of_sentance_tr=[]
+for sentance in X_tr:
+    list_of_sentance_tr.append(sentance.split())
+final_X_tr = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance_tr): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    final_X_tr.append(sent_vec)
+    
+    
+list_of_sentance_cv=[]
+for sentance in X_cv:
+    list_of_sentance_cv.append(sentance.split())    
+final_X_cv = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance_cv): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    final_X_cv.append(sent_vec)    
+    
+    
+list_of_sentance_test=[]
+for sentance in X_test:
+    list_of_sentance_test.append(sentance.split())    
+final_X_test = []; # the avg-w2v for each sentence/review is stored in this list
+for sent in tqdm(list_of_sentance_test): # for each review/sentence
+    sent_vec = np.zeros(50) # as word vectors are of zero length 50, you might need to change this to 300 if you use google's w2v
+    cnt_words =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words:
+            vec = w2v_model.wv[word]
+            sent_vec += vec
+            cnt_words += 1
+    if cnt_words != 0:
+        sent_vec /= cnt_words
+    final_X_test.append(sent_vec)    
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in tqdm(range(1,100,20)):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print("best K is",k_best)
+print("max AUC Score is",max_auc_score)
+k7=k_best
+auc7=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Train and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# ### [5.2.4] Applying KNN kd-tree on TFIDF W2V,<font color='red'> SET 4</font>
+
+# In[ ]:
+
+
+# Please write all the code with proper documentation
+# Please write all the code with proper documentation
+# TF-IDF weighted Word2Vec
+tfidf_feat = model.get_feature_names() # tfidf words/col-names
+# final_tf_idf is the sparse matrix with row= sentence, col=word and cell_val = tfidf
+
+list_of_sentance_tr=[]
+for sentance in X_tr:
+    list_of_sentance_tr.append(sentance.split())
+final_X_tr = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance_tr): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    final_X_tr.append(sent_vec)
+    row += 1
+
+    
+list_of_sentance_cv=[]
+for sentance in X_cv:
+    list_of_sentance_cv.append(sentance.split())
+final_X_cv = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance_cv): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    final_X_cv.append(sent_vec)
+    row += 1 
+    
+    
+list_of_sentance_test=[]
+for sentance in X_test:
+    list_of_sentance_test.append(sentance.split())
+final_X_test = []; # the tfidf-w2v for each sentence/review is stored in this list
+row=0;
+for sent in tqdm(list_of_sentance_test): # for each review/sentence 
+    sent_vec = np.zeros(50) # as word vectors are of zero length
+    weight_sum =0; # num of words with a valid vector in the sentence/review
+    for word in sent: # for each word in a review/sentence
+        if word in w2v_words and word in tfidf_feat:
+            vec = w2v_model.wv[word]
+#             tf_idf = tf_idf_matrix[row, tfidf_feat.index(word)]
+            # to reduce the computation we are 
+            # dictionary[word] = idf value of word in whole courpus
+            # sent.count(word) = tf valeus of word in this review
+            tf_idf = dictionary[word]*(sent.count(word)/len(sent))
+            sent_vec += (vec * tf_idf)
+            weight_sum += tf_idf
+    if weight_sum != 0:
+        sent_vec /= weight_sum
+    final_X_test.append(sent_vec)
+    row += 1    
+
+
+# In[ ]:
+
+
+#Calculating for finding Best K
+roc_tr=[]
+roc_cv=[]
+k_value=[]
+max_auc_score=0
+K_best=0
+for i in tqdm(range(1,100,20)):
+    # instantiate learning model (k = 100)
+    knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=i)
+
+    # fitting the model on train data
+    knn.fit(final_X_tr, y_tr)
+
+    # predict the response on the crossvalidation 
+    pred_cv = knn.predict_proba(final_X_cv)
+    pred_cv=(pred_cv)[:,1]
+    roc_cv.append(roc_auc_score(y_cv,pred_cv))
+    
+     # predict the response on the traininig
+    pred_tr = knn.predict_proba(final_X_tr)
+    pred_tr=(pred_tr)[:,1]
+    roc_tr.append(roc_auc_score(y_tr,pred_tr))
+    k_value.append(i)
+    
+    #finding best k using max value of auc score
+    if roc_auc_score(y_cv,pred_cv)>max_auc_score:
+        k_best=i
+        max_auc_score=roc_auc_score(y_cv,pred_cv)
+print("best K is",k_best)
+print("max AUC Score is",max_auc_score)
+k8=k_best
+auc8=max_auc_score
+
+
+# In[ ]:
+
+
+# plotting curve between K vs Train and Cross validation Data
+plt.plot(k_value,roc_cv ,label="AUC cv")
+plt.plot(k_value,roc_tr,label="AUC train")
+plt.legend()
+plt.title('AUC Score vs K')
+plt.xlabel('K')
+plt.ylabel('AUC')
+plt.show()
+
+
+# In[ ]:
+
+
+# Training the model using best K    
+knn = KNeighborsClassifier(algorithm='kd_tree',metric='minkowski',n_neighbors=k_best)
+knn.fit(final_X_tr, y_tr)
+#predicting probability on Test data
+pred_test = knn.predict_proba(final_X_test)
+pred_test=(pred_test)[:,1]
+#predicting probablity of Training data
+pred_tr = knn.predict_proba(final_X_tr)
+pred_tr=(pred_tr)[:,1]
+
+
+# In[ ]:
+
+
+#Plotting Roc Curve
+
+#fiding fpr and tpr on Train and Test Data
+fpr, tpr, threshold = metrics.roc_curve(y_test, pred_test)
+fpr1, tpr1, threshold1 = metrics.roc_curve(y_tr, pred_tr)
+
+#plotting
+plt.plot(fpr,tpr ,label="characterstics on Test data")
+plt.plot(fpr1,tpr1 ,label="characterstics on Train data")
+plt.legend()
+plt.title('ROC on best K')
+plt.xlabel('FPR')
+plt.ylabel('TPR')
+plt.show()
+
+
+# In[ ]:
+
+
+#finding Confusion_matrix
+predic=knn.predict(final_X_test)
+conf_mat = confusion_matrix(y_test, predic)
+print(conf_mat)
+
+
+# In[ ]:
+
+
+#plotting Confusion Matrix
+class_label = ["negative", "positive"]
+df = pd.DataFrame(conf_mat, index = class_label, columns = class_label)
+sns.heatmap(df, annot = True,fmt="d")
+plt.title("Confusion Matrix")
+plt.xlabel("Predicted Label")
+plt.ylabel("True Label")
+plt.show()
+
+
+# # [6] Conclusions
+
+# In[ ]:
+
+
+# Please compare all your models using Prettytable library
+from prettytable import PrettyTable    
+x = PrettyTable()
+x.field_names = ["Vectorizer", "Model", "Hyperameter", "AUC"]
+x.add_row(["BOW","Brute",k1,auc1])
+x.add_row(["TFIDF","Brute",k2,auc2])
+x.add_row(["AwgW2V","Brute",k3,auc3])
+x.add_row(["TFIDF W2V","Brute",k4,auc4])
+x.add_row(["BOW","k_d tree",k5,auc5])
+x.add_row(["TFIDF","k_d tree",k6,auc6])
+x.add_row(["AwgW2V","k_d tree",k7,auc7])
+x.add_row(["TFIDF W2V","k_d tree",k8,auc8])
+print(x)
+
+
+
+# In[ ]:
+
+
+
+

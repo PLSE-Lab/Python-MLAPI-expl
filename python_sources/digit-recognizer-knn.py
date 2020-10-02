@@ -1,0 +1,32 @@
+import pandas as pd
+import numpy as np
+from sklearn import tree
+from sklearn import grid_search
+from sklearn import cross_validation
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import RandomForestClassifier
+# The competition datafiles are in the directory ../input
+# Read competition data files:
+df = pd.read_csv("../input/train.csv")
+test  = pd.read_csv("../input/test.csv")
+
+# Write to the log:
+print("Training set has {0[0]} rows and {0[1]} columns".format(df.shape))
+print("Test set has {0[0]} rows and {0[1]} columns".format(test.shape))
+# Any files you write to the current directory get shown as outputs
+
+target = df.ix[:,0]
+train = df.drop('label', 1)
+
+X_train, X_test, y_train, y_test = cross_validation.train_test_split(train, target, test_size=0.2, random_state=1)
+#parameters = {'min_samples_leaf' :[1, 10, 20, 30], 'max_depth': [None, 1, 10, 50, 100]}
+clf = RandomForestClassifier()
+clf = clf.fit(X_train, y_train)
+#grid_obj = grid_search.GridSearchCV(clf, parameters)
+#grid_obj = grid_obj.fit(X_train, y_train)
+print(clf.score(X_test, y_test))
+pred = clf.predict(test)
+print("predict done")
+np.savetxt('submission_2.csv', np.c_[range(1,len(test)+1),pred], delimiter=',', header = 'ImageId,Label', comments = '', fmt='%d')
+
+print("done!")

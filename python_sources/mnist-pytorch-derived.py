@@ -1,0 +1,43 @@
+def __bootstrap__():
+    import sys
+    import base64
+    import gzip
+    import os
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    # this is base64 encoded source code
+    pkg_encoded: str = "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"
+
+    with TemporaryDirectory() as temp_dir:
+        pkg_path = Path(temp_dir) / "mnist_pytorch-0.1.0-py3-none-any.whl"
+        pkg_path.write_bytes(gzip.decompress(base64.b64decode(pkg_encoded)))
+        os.system("pip install --no-deps {pkg_path}".format(pkg_path=pkg_path))
+
+    sys.path.append("/kaggle/working")
+    os.environ.update({})
+__bootstrap__()
+
+import os
+from pathlib import Path
+
+import wandb
+
+from mnist_pytorch import io
+from mnist_pytorch.network import Network, extract_result
+from mnist_pytorch.train import train
+
+wandb.init(project="mnist-pytorch-derived")
+
+root = Path("../input/digit-recognizer")
+train_x, train_y = io.load_train_data(root)
+
+test = io.load_test_data(root)
+
+net = Network()
+losses = train(net, train_x, train_y)
+
+net_out = net(test)
+result = extract_result(net_out)
+io.save_result(result)
+
