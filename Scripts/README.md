@@ -1,2 +1,2 @@
 get_kernels.cmd - Windows batch file that downloads Python source files from Kaggle
-get_kernels_notebook.cmd - Windows batch file that downloads Jupyter Notebooks source files from Kaggle
+generate_batch.py - Python script to generate command file. Should be placed in the meta-kaggle folder
