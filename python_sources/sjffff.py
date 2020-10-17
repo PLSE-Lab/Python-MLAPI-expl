@@ -1,1 +1,0 @@
-from kears.models import Sequential

@@ -1,8 +1,0 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
-get_ipython().run_cell_magic('time', '', '# This is my first time working on Kaggle. \n# I have been following the \'Kernels\' everyone has been sharing, while getting up to speed on my own\n# Thank you to jazivxt, paulorzp, cdeotte for solutions dueling in elegance \n# and Allunia, Abhishek, speedwagon and many others for exploring and sharing early\n# I plan to make original contributions soon\n#\n# This submission is just an exercise to check the submission process, so the only change in this fork\n# is the substitution of Gradient Boosted Regressior in place of SVM\n\nimport pandas as p; from sklearn import *\nimport warnings; warnings.filterwarnings("ignore")\nt, r = [p.read_csv(\'../input/\' + f) for f in [\'train.csv\', \'test.csv\']]\ncl = \'wheezy-copper-turtle-magic\'; re_ = []\ncol = [c for c in t.columns if c not in [\'id\', \'target\', cl]]\n\n# These hyperparameters have not been tested. They are mostly default, but configured to take advantage of early stopping\ngbc = ensemble.GradientBoostingClassifier(learning_rate=0.1,\n                                  n_estimators=500,\n                                  subsample=1.0,\n                                  max_depth=3,\n                                  presort=True,\n                                  validation_fraction=0.1,\n                                  n_iter_no_change=7,\n                                  random_state=7)\nfor s in sorted(t[cl].unique()):\n    t_ = t[t[cl]==s]\n    r_ = r[r[cl]==s]\n    gbc.fit(t_[col], t_[\'target\'])\n    r_[\'target\'] = gbc.predict_proba(r_[col])[:,1]\n    re_.append(r_)\np.concat(re_)[[\'id\',\'target\']].to_csv("submission.csv", index=False)')
-

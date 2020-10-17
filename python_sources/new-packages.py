@@ -1,2 +1,0 @@
-import mne
-import shapefile

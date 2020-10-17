@@ -1,1 +1,0 @@
-# https://github.com/honchardev/Fun/blob/master/AI/kaggle/house_prices/solution_jul29/house_prices_jul29.py

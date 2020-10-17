@@ -1,2 +1,0 @@
-import keras
-keras.__version__
